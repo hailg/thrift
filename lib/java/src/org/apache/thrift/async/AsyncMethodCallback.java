@@ -20,6 +20,17 @@ package org.apache.thrift.async;
 
 
 public interface AsyncMethodCallback<T> {
+
+  /**
+   * This method is only applicable for Observable call.
+   * This method will be called when the remote side has completed invoking
+   * your method call and the result is fully read.
+   * @param responses
+   */
+  default void onProcess(T response) {
+
+  }
+
   /**
    * This method will be called when the remote side has completed invoking
    * your method call and the result is fully read. For oneway method calls,
@@ -27,7 +38,7 @@ public interface AsyncMethodCallback<T> {
    * request.
    * @param response
    */
-  public void onComplete(T response);
+  void onComplete(T response);
 
   /**
    * This method will be called when there is an unexpected clientside
@@ -35,5 +46,5 @@ public interface AsyncMethodCallback<T> {
    * appear in the IDL, but rather things like IOExceptions.
    * @param exception
    */
-  public void onError(Exception exception);
+  void onError(Exception exception);
 }

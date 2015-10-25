@@ -24,13 +24,18 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.util.concurrent.atomic.AtomicLong;
 
+import org.apache.thrift.TApplicationException;
 import org.apache.thrift.TException;
+import org.apache.thrift.protocol.TMessage;
+import org.apache.thrift.protocol.TMessageType;
 import org.apache.thrift.protocol.TProtocol;
 import org.apache.thrift.protocol.TProtocolFactory;
 import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TMemoryBuffer;
 import org.apache.thrift.transport.TNonblockingTransport;
 import org.apache.thrift.transport.TTransportException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Encapsulates an async method call
@@ -42,7 +47,26 @@ import org.apache.thrift.transport.TTransportException;
 public abstract class TAsyncMethodCall<T> {
 
   private static final int INITIAL_MEMORY_BUFFER_SIZE = 128;
+  private static final Logger LOGGER = LoggerFactory.getLogger(TAsyncMethodCall.class.getName());
+
   private static AtomicLong sequenceIdCounter = new AtomicLong(0);
+
+  private class ResultWrapper<T> {
+    T result;
+    int msgType;
+    Exception e;
+
+    public ResultWrapper(Exception e, int msgType) {
+      this.e = e;
+      this.msgType = msgType;
+    }
+
+    public ResultWrapper(T result, int msgType) {
+      this.result = result;
+      this.msgType = msgType;
+      this.e = e;
+    }
+  }
 
   public static enum State {
     CONNECTING,
@@ -222,11 +246,89 @@ public abstract class TAsyncMethodCall<T> {
 
   private void cleanUpAndFireCallback(SelectionKey key) {
     state = State.RESPONSE_READ;
+    try {
+      ResultWrapper<T> resultWrapper = receive();
+      switch (resultWrapper.msgType) {
+        case TMessageType.EXCEPTION:
+          notifyException(key, resultWrapper);
+          break;
+        case TMessageType.REPLY:
+          notifyCallReply(key, resultWrapper);
+          break;
+        case TMessageType.OBSERVABLE:
+          notifyObservable(key, resultWrapper);
+          break;
+        case TMessageType.OBSERVABLE_ENDED:
+          notifyObservableEnd(key, resultWrapper);
+          break;
+      }
+    } catch (TException e) {
+      //This will never happen
+      LOGGER.error("cleanUpAndFireCallback", e);
+    }
+  }
+
+  private void notifyException(SelectionKey key, ResultWrapper<T> resultWrapper) {
     key.interestOps(0);
     // this ensures that the TAsyncMethod instance doesn't hang around
     key.attach(null);
     client.onComplete();
-    callback.onComplete((T)this);
+    try {
+      callback.onError(resultWrapper.e);
+    } catch (Exception e) {
+      LOGGER.error("notifyException", e);
+    }
+  }
+
+  private void notifyCallReply(SelectionKey key, ResultWrapper<T> resultWrapper) {
+    key.interestOps(0);
+    // this ensures that the TAsyncMethod instance doesn't hang around
+    key.attach(null);
+    client.onComplete();
+
+    try {
+      if (resultWrapper.e != null) {
+        callback.onError(resultWrapper.e);
+      } else {
+        callback.onComplete(resultWrapper.result);
+      }
+    } catch (Exception e) {
+      LOGGER.error("Callback Exception", e);
+    }
+  }
+
+  private void notifyObservable(SelectionKey key, ResultWrapper<T> resultWrapper) {
+    try {
+      if (resultWrapper.e != null) {
+        callback.onError(resultWrapper.e);
+      } else {
+        callback.onProcess(resultWrapper.result);
+      }
+    } catch (Exception e) {
+      LOGGER.error("Callback Exception", e);
+    }
+
+    //We're expecting more messages
+    state = State.READING_RESPONSE_SIZE;
+    sizeBuffer.rewind();  // Prepare to read incoming frame size
+    key.interestOps(SelectionKey.OP_READ);
+  }
+
+  private void notifyObservableEnd(SelectionKey key, ResultWrapper<T> resultWrapper) {
+    key.interestOps(0);
+    // this ensures that the TAsyncMethod instance doesn't hang around
+    key.attach(null);
+    client.onComplete();
+
+    try {
+      if (resultWrapper.e != null) {
+        callback.onError(resultWrapper.e);
+      } else {
+        callback.onComplete(resultWrapper.result);
+      }
+    } catch (Exception e) {
+      LOGGER.error("Callback Exception", e);
+    }
   }
 
   private void doReadingResponseSize() throws IOException {
@@ -268,5 +370,26 @@ public abstract class TAsyncMethodCall<T> {
       throw new IOException("not connectable or finishConnect returned false after we got an OP_CONNECT");
     }
     registerForFirstWrite(key);
+  }
+
+  protected abstract T getResult(TProtocol protocol) throws org.apache.thrift.TException ;
+  protected abstract TProtocol getInputProtocol();
+
+  private ResultWrapper<T> receive() throws TException {
+    TProtocol protocol = getInputProtocol();
+    TMessage msg = protocol.readMessageBegin();
+    if (msg.type == TMessageType.EXCEPTION) {
+      TApplicationException x = TApplicationException.read(protocol);
+      protocol.readMessageEnd();
+      return new ResultWrapper<>(x, msg.type);
+    }
+    try {
+      T result = getResult(protocol);
+      return new ResultWrapper(result, msg.type);
+    } catch (Exception e) {
+      return new ResultWrapper<>(e, msg.type);
+    } finally {
+      protocol.readMessageEnd();
+    }
   }
 }

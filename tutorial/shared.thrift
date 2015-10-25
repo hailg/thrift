@@ -37,4 +37,8 @@ struct SharedStruct {
 
 service SharedService {
   SharedStruct getStruct(1: i32 key)
+  string hello(1: string name)
+  oneway void helloOneWay(1: string name)
+  void helloVoid(1: string name)
+  string observeSimple(1: string id)
 }

@@ -19,7 +19,7 @@ public abstract class ProcessFunction<I, T extends TBase> {
     this.methodName = methodName;
   }
 
-  public final void process(int seqid, TProtocol iprot, TProtocol oprot, I iface) throws TException {
+  public void process(int seqid, TProtocol iprot, TProtocol oprot, I iface) throws TException {
     T args = getEmptyArgsInstance();
     try {
       args.read(iprot);
